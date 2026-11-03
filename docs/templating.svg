@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 424" role="img" aria-label="Updates go into the base once; every qube gets a stripped copy" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+<style>
+  .box { fill: none; stroke: #8c959f; stroke-width: 1.25; }
+  .main { fill: #0969da; fill-opacity: 0.12; stroke: #0969da; stroke-width: 2; }
+  .edge { fill: none; stroke: #8c959f; stroke-width: 1.25; }
+  .arrow { fill: #8c959f; }
+  .title, .name, .ink { fill: #1f2328; }
+  .title { font-size: 15px; font-weight: 600; }
+  .name { font-weight: 600; }
+  .quiet { fill: #59636e; }
+  .small { font-size: 11.5px; }
+  @media (prefers-color-scheme: dark) {
+    .box, .edge { stroke: #6e7681; }
+    .arrow { fill: #6e7681; }
+    .main { fill: #4493f8; stroke: #4493f8; }
+    .title, .name, .ink { fill: #e6edf3; }
+    .quiet { fill: #9198a1; }
+  }
+</style>
+<defs><marker id="mt-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="arrow" d="M0 0L10 5L0 10z"/></marker></defs>
+<text class="title" x="24" y="32">Updates go into the base once; every qube gets a stripped copy</text>
+<g class="edge"><path d="M200 84H230" marker-end="url(#mt-arrow)"/><path d="M530 84H560" marker-end="url(#mt-arrow)"/><path d="M380 112V140H140V168" marker-end="url(#mt-arrow)"/><path d="M380 112V168" marker-end="url(#mt-arrow)"/><path d="M380 140H620V168" marker-end="url(#mt-arrow)"/><path d="M140 224V256" marker-end="url(#mt-arrow)"/><path d="M140 312V344" marker-end="url(#mt-arrow)"/><path d="M380 224V256" marker-end="url(#mt-arrow)"/><path d="M380 312V344" marker-end="url(#mt-arrow)"/><path d="M620 224V256" marker-end="url(#mt-arrow)"/><path d="M620 312V344" marker-end="url(#mt-arrow)"/></g>
+<rect class="box" x="24" y="56" width="176" height="56" rx="8"/><text class="name" x="112" y="80" text-anchor="middle">Qubes updater</text><text class="quiet small" x="112" y="96" text-anchor="middle">updates the base only</text>
+<rect class="main" x="230" y="56" width="300" height="56" rx="8"/><text class="name" x="380" y="80" text-anchor="middle">fedora-44-minimal (base)</text><text class="ink small" x="380" y="96" text-anchor="middle">all packages + the lists</text>
+<rect class="box" x="560" y="56" width="176" height="56" rx="8"/><text class="name" x="648" y="80" text-anchor="middle">Watcher (dom0)</text><text class="quiet small" x="648" y="96" text-anchor="middle">rebuilds on shutdown</text>
+<text class="quiet small" x="392" y="134">thin clone, then dnf remove</text>
+<rect class="box" x="32.0" y="168" width="216" height="56" rx="8"/><text class="name" x="140" y="192" text-anchor="middle">f44-sys-net</text><text class="quiet small" x="140" y="208" text-anchor="middle">base minus sys-net.dnf</text>
+<rect class="box" x="272.0" y="168" width="216" height="56" rx="8"/><text class="name" x="380" y="192" text-anchor="middle">f44-sys-vpn</text><text class="quiet small" x="380" y="208" text-anchor="middle">base minus sys-vpn.dnf</text>
+<rect class="box" x="512.0" y="168" width="216" height="56" rx="8"/><text class="name" x="620" y="192" text-anchor="middle">Other f44-* templates</text><text class="quiet small" x="620" y="208" text-anchor="middle">base minus its own list</text>
+<rect class="box" x="32.0" y="256" width="216" height="56" rx="8"/><text class="name" x="140" y="280" text-anchor="middle">sys-net-dvm</text><text class="quiet small" x="140" y="296" text-anchor="middle">saved Wi-Fi networks</text>
+<rect class="box" x="272.0" y="256" width="216" height="56" rx="8"/><text class="name" x="380" y="280" text-anchor="middle">sys-vpn-dvm</text><text class="quiet small" x="380" y="296" text-anchor="middle">WireGuard configs</text>
+<rect class="box" x="512.0" y="256" width="216" height="56" rx="8"/><text class="name" x="620" y="280" text-anchor="middle">Other *-dvm</text><text class="quiet small" x="620" y="296" text-anchor="middle">their own /rw files</text>
+<rect class="box" x="32.0" y="344" width="216" height="56" rx="8"/><text class="name" x="140" y="368" text-anchor="middle">sys-net</text><text class="quiet small" x="140" y="384" text-anchor="middle">named disposable</text>
+<rect class="box" x="272.0" y="344" width="216" height="56" rx="8"/><text class="name" x="380" y="368" text-anchor="middle">sys-vpn</text><text class="quiet small" x="380" y="384" text-anchor="middle">named disposable</text>
+<rect class="box" x="512.0" y="344" width="216" height="56" rx="8"/><text class="name" x="620" y="368" text-anchor="middle">sys-firewall and others</text><text class="quiet small" x="620" y="384" text-anchor="middle">named disposables</text>
+</svg>
