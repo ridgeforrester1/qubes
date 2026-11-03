@@ -1,0 +1,8 @@
+# NetworkManager for the boot script's 'nmcli connection import type wireguard'
+qubes-core-agent-networking
+qubes-core-agent-network-manager
+network-manager-applet
+notification-daemon
+qubes-notification-agent
+Thunar
+xfce4-terminal

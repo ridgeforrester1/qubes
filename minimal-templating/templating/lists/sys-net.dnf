@@ -1,0 +1,10 @@
+qubes-core-agent-networking
+qubes-core-agent-network-manager
+NetworkManager-wifi
+network-manager-applet
+iwlwifi-mvm-firmware
+iwlbluetooth-firmware
+notification-daemon
+qubes-notification-agent
+Thunar
+xfce4-terminal

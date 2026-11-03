@@ -1,0 +1,14 @@
+# ~/.config/systemd/user/minimal-templating-listen.service  (dom0)
+[Unit]
+Description=Rebuild minimal templates after the base template is updated
+
+[Service]
+ExecStart=%h/.local/bin/minimal-templating-listen
+Restart=on-failure
+RestartSec=30
+Nice=10
+# Covers the idle listener (~30-40 MB) plus a running rebuild and its qvm-run calls.
+MemoryMax=256M
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,202 @@
+#!/usr/bin/python3 -I
+# /etc/minimal-templating/apply - strip a derived template down to its allowlists.
+#
+# Lives in the BASE template (fedora-44-minimal) with the lists, in
+# /etc/minimal-templating/ (root:root, script 0755). Every f44-* template is a
+# clone of the base, so it starts with a copy; dom0's minimal-templating runs it
+# there as root.
+#
+# Lists in /etc/minimal-templating/ (one name per line, '#' comments allowed):
+#   master.dnf       every RPM you added on top of the template (the removable set)
+#   <name>.dnf       RPMs from master.dnf this template keeps          (required)
+#   <name>.flatpak   Flatpak app IDs this template keeps   (missing = keep none)
+#
+# Real run (only in a derived template, and only when --in matches its name):
+#   First:     delete base-only hooks (the Flatpak update hook), so the dnf
+#              transaction below can't trigger Flatpak downloads in this template
+#   RPMs:      remove (master.dnf - <name>.dnf), plus dependents and unused deps
+#   Flatpaks:  uninstall every installed app not in <name>.flatpak, then unused runtimes
+#   Verify:    allowlisted packages still installed, removed ones gone; else exit 1
+#   Clean up:  always, success or failure: delete /etc/minimal-templating (this
+#              script and all lists), /var/log/dnf5.log*, and the template's
+#              journal, so qubes based on it carry no trace of the mechanism.
+#              The next rebuild starts from a fresh copy of the base anyway.
+#
+# Usage:
+#   apply --dry-run NAME             show the plan and dnf's transaction; change nothing
+#   apply --in TEMPLATE NAME         real run (called by dom0; don't run by hand)
+
+import glob
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+DIR = "/etc/minimal-templating"
+DNF = ["dnf", "--disable-repo=*"]          # templates are offline; never touch repos
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+APPMENUS_HOOK = "/etc/qubes/post-install.d/10-qubes-core-agent-appmenus.sh"
+# Hooks that must only ever run in the base template (removed from derived ones).
+BASE_ONLY_HOOKS = ("/etc/qubes/post-install.d/05-flatpak-update.sh",)
+
+
+class Fail(Exception):
+    pass
+
+
+def say(msg):
+    print(f"apply: {msg}", flush=True)
+
+
+def run(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def read_list(name, required):
+    path = os.path.join(DIR, name)
+    if not os.path.exists(path):
+        if required:
+            raise Fail(f"missing list {path}")
+        return set()
+    items = set()
+    with open(path, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            s = line.split("#", 1)[0].strip()
+            if not s:
+                continue
+            if not NAME_RE.match(s):
+                raise Fail(f"{path}:{n}: invalid name {s!r}")
+            items.add(s)
+    return items
+
+
+def installed_rpms(names):
+    """Subset of names that are installed."""
+    if not names:
+        return set()
+    r = run(["rpm", "-q", "--qf", "%{NAME}\n", *sorted(names)])
+    return {l.strip() for l in r.stdout.splitlines()} & set(names)
+
+
+def flatpak_apps():
+    if not shutil.which("flatpak"):
+        return set()
+    r = run(["flatpak", "list", "--app", "--system", "--columns=application"])
+    if r.returncode != 0:
+        raise Fail(f"flatpak list failed: {r.stderr.strip()[:300]}")
+    return set(r.stdout.split())
+
+
+def qdb(key):
+    r = run(["qubesdb-read", key])
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def strip(name, dry):
+    master = read_list("master.dnf", True)
+    keep = read_list(f"{name}.dnf", True)
+    keep_fp = read_list(f"{name}.flatpak", False)
+
+    present = installed_rpms(master)
+    remove = sorted(present - keep)
+    keep_present = present & keep
+    apps = flatpak_apps()
+    remove_fp = sorted(apps - keep_fp)
+
+    say(f"list={name} remove_rpms={len(remove)} remove_flatpaks={len(remove_fp)}")
+    if remove:
+        say("rpms to remove (plus dependents and unused deps): " + " ".join(remove))
+    if remove_fp:
+        say("flatpaks to remove: " + " ".join(remove_fp))
+
+    if dry:
+        if remove:
+            r = run(DNF + ["--assumeno", "remove", *remove])
+            print(r.stdout + r.stderr, flush=True)
+        say("dry run: no changes made")
+        return
+
+    # Flatpaks first: removing the flatpak RPM afterwards would strand the apps.
+    if remove_fp:
+        r = run(["flatpak", "uninstall", "--system", "-y", "--noninteractive", *remove_fp])
+        if r.returncode != 0:
+            raise Fail(f"flatpak uninstall failed: {r.stderr.strip()[:500]}")
+        run(["flatpak", "uninstall", "--system", "-y", "--noninteractive", "--unused"])
+
+    if remove:
+        r = run(DNF + ["-y", "remove", *remove])
+        print(r.stdout, flush=True)
+        if r.returncode != 0:
+            raise Fail(f"dnf remove failed: {r.stderr.strip()[:800]}")
+
+    lost = sorted(keep_present - installed_rpms(keep_present))
+    if lost:
+        raise Fail("allowlisted packages were removed as dependents: " + " ".join(lost)
+                   + " (add what they depend on to the allowlist)")
+    left = sorted(installed_rpms(set(remove)))
+    if left:
+        raise Fail("packages still installed after removal: " + " ".join(left))
+
+    if remove_fp and os.access(APPMENUS_HOOK, os.X_OK):
+        run([APPMENUS_HOOK])   # dnf runs this hook itself; flatpak removal does not
+
+
+def cleanup():
+    """Remove every trace of minimal templating from this derived template."""
+    shutil.rmtree(DIR, ignore_errors=True)
+    for f in glob.glob("/var/log/dnf5.log*"):
+        try:
+            os.unlink(f)
+        except OSError:
+            pass
+    run(["journalctl", "--rotate"])
+    run(["journalctl", "--vacuum-time=1s"])
+    say("cleaned up: removed /etc/minimal-templating, dnf5 logs and journal")
+
+
+def main():
+    args = sys.argv[1:]
+    if len(args) == 2 and args[0] == "--dry-run":
+        dry, target, name = True, None, args[1]
+    elif len(args) == 3 and args[0] == "--in":
+        dry, target, name = False, args[1], args[2]
+    else:
+        print("usage: apply --dry-run NAME | apply --in TEMPLATE NAME", file=sys.stderr)
+        return 2
+    if not NAME_RE.match(name):
+        print(f"invalid name {name!r}", file=sys.stderr)
+        return 2
+
+    if not dry:
+        # Safety: a real run destroys packages and deletes the lists, so it must
+        # only ever happen in the derived template dom0 named, never in the base.
+        if os.geteuid() != 0:
+            say("FAIL must run as root")
+            return 1
+        if qdb("/name") != target or qdb("/qubes-vm-type") != "TemplateVM":
+            say(f"FAIL refusing: this is not template {target!r}")
+            return 1
+        # Before any dnf transaction: hooks in post-install.d run after every
+        # one, and the Flatpak update hook would download updates here.
+        for hook in BASE_ONLY_HOOKS:
+            if os.path.exists(hook):
+                os.unlink(hook)
+                say(f"removed base-only hook {hook}")
+
+    try:
+        strip(name, dry)
+        rc = 0
+        if not dry:
+            say("OK")
+    except Fail as e:
+        say(f"FAIL {e}")
+        rc = 1
+    finally:
+        if not dry:
+            cleanup()
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

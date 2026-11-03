@@ -1,0 +1,621 @@
+#!/usr/bin/python3
+# minimal-templating - build and refresh minimal derived templates from one base (dom0).
+#
+# Install in dom0 as ~/.local/bin/minimal-templating (chmod +x).
+# Config: ~/.config/minimal-templating/templates.conf
+# Log:    ~/.local/state/minimal-templating/minimal-templating.log  (also stdout)
+#
+# Each config section describes one stack, top to bottom:
+#   [template]       derived template, cloned from the base and stripped
+#   dvm  = <name>    disposable template on that template           (optional)
+#   qube = <name>    qube on top:                                    (optional)
+#                      dvm set   -> named disposable based on the dvm
+#                      dvm blank -> standard app qube based on the template
+#   qube blank + dvm set -> the dvm is for unnamed disposables (dispNNNN)
+#
+# The lists used are /etc/minimal-templating/<list>.dnf / .flatpak in the base,
+# where <list> is the qube name, or the dvm name when qube is blank.
+#
+# Optional shared template (off by default): one template serving several
+# stacks whose lists would make identical templates. Step-by-step directions,
+# with an example, are at the top of templates.conf.
+#
+# Each run:
+#   1. Starts the base once to see which lists exist. Sections without a .dnf
+#      list are skipped (logged), so you can add one before writing its list.
+#   2. For each section that has a list:
+#      - template missing  -> clone it from the base (label black)
+#        template existing -> replace its root with a thin snapshot of the base's root
+#      - keep no previous versions (revisions_to_keep 0), set skip-update=1
+#      - run /etc/minimal-templating/apply inside it as root; it strips the
+#        template and then deletes itself and the lists. Then shut it down.
+#      - on success: create the dvm (black) and qube (red) if missing, and point
+#        existing ones at the right template (halted ones only). Nothing else is
+#        set: netvm, firewall, devices etc. stay at Qubes defaults.
+#      - on failure: logged. The template is left half-stripped: fix the lists and
+#        rerun 'minimal-templating --only <template>' before restarting its qubes.
+#   3. One notification: "Templating process completed".
+#
+# Usage:
+#   minimal-templating            build/refresh everything now
+#   minimal-templating --auto     only if the base's last-update changed since the
+#                                 last run (used by the listener)
+#   minimal-templating --only f44-sys-net [--only ...]
+#   minimal-templating --preview  run 'apply --dry-run' for every section inside the
+#                                 base itself (changes nothing) and log the plans
+#   minimal-templating --status   show every stack and its state (starts nothing)
+#   minimal-templating --switch   one-time move of the configured named disposables
+#                                 onto their stacks: shows a plan, asks y/N, shuts
+#                                 ALL qubes down, then points every disposable
+#                                 template at its f44-* template, and for each
+#                                 named disposable:
+#                                   missing           -> create it
+#                                   named disposable  -> point it at its dvm
+#                                   app qube          -> keep it as <name>-old and
+#                                     create a named disposable in its place, copying
+#                                     netvm, provides_network, autostart, memory,
+#                                     services, firewall rules and PCI devices, and
+#                                     re-pointing every qube/global setting that used it
+#                                 then starts again the named disposables that were
+#                                 running. Safe to re-run: it only does what's needed.
+
+import argparse
+import configparser
+import fcntl
+import os
+import re
+import subprocess
+import sys
+import time
+
+import qubesadmin
+
+CONF = os.path.expanduser("~/.config/minimal-templating/templates.conf")
+STATE_DIR = os.path.expanduser("~/.local/state/minimal-templating")
+LOG = os.path.join(STATE_DIR, "minimal-templating.log")
+STAMP = os.path.join(STATE_DIR, "last-update")
+BUILT_DIR = os.path.join(STATE_DIR, "built")
+LOCK = os.path.join(STATE_DIR, "lock")
+DIR = "/etc/minimal-templating"
+APPLY = f"{DIR}/apply"
+RUN_TIMEOUT = 1800          # seconds for apply inside a template
+HALT_TIMEOUT = 180
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+# Labels for qubes this script creates (existing qubes are never relabelled).
+LABEL_TEMPLATE = "black"
+LABEL_DVM = "black"
+LABEL_NAMED_DISP = "red"
+LABEL_APPVM = "red"
+
+
+def log(msg):
+    line = time.strftime("%Y-%m-%d %H:%M:%S ") + msg
+    print(line, flush=True)
+    with open(LOG, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def notify(summary, body=""):
+    try:
+        subprocess.run(["notify-send", "-a", "minimal-templating", summary, body],
+                       timeout=10, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def clean(text, limit=20000):
+    """Template output is untrusted: keep printable characters only, cap length."""
+    text = "".join(c if (c.isprintable() or c == "\n") else "?" for c in text)
+    return text[:limit]
+
+
+def load_config():
+    """Each section becomes a stack: {template, list, members}. A member is one
+    {template, dvm, qube} triple. Normally a stack has one member; a shared
+    template (several names in dvm/qube) has one member per position."""
+    cp = configparser.ConfigParser()
+    if not cp.read(CONF):
+        sys.exit(f"missing config {CONF}")
+    base = cp.get("general", "base")
+    stacks, seen = [], {}
+    for sect in cp.sections():
+        if sect == "general":
+            continue
+        dvms = cp.get(sect, "dvm", fallback="").split()
+        qubes = cp.get(sect, "qube", fallback="").split()
+        lst = cp.get(sect, "list", fallback="").strip()
+        if not dvms and not qubes:
+            sys.exit(f"[{sect}]: set qube, dvm, or both")
+        shared = len(dvms) > 1 or len(qubes) > 1
+        if shared and not lst:
+            sys.exit(f"[{sect}]: a shared template needs 'list = <name>' (which lists to use)")
+        if dvms and qubes and len(dvms) != len(qubes):
+            sys.exit(f"[{sect}]: give one qube per dvm (paired in order), or leave qube blank")
+        if dvms:
+            members = [{"template": sect, "dvm": d, "qube": qubes[i] if qubes else ""}
+                       for i, d in enumerate(dvms)]
+        else:
+            members = [{"template": sect, "dvm": "", "qube": q} for q in qubes]
+        lst = lst or (qubes[0] if qubes else dvms[0])
+        for n in [sect, lst, *dvms, *qubes]:
+            if not NAME_RE.match(n):
+                sys.exit(f"invalid name {n!r} in section [{sect}]")
+        for n in [sect, *dvms, *qubes]:
+            if n in seen:
+                sys.exit(f"{n!r} appears in both [{seen[n]}] and [{sect}]")
+            seen[n] = sect
+        stacks.append({"template": sect, "list": lst, "members": members})
+    return base, stacks
+
+
+def shutdown(vm):
+    """Shut down and wait until Qubes has finished saving the qube's disk.
+    qvm-shutdown --wait returns only after the shutdown is fully processed;
+    polling is_halted() alone can return before a template's root is committed,
+    and a clone taken then would copy the previous version."""
+    if not vm.is_running():
+        return
+    r = subprocess.run(["qvm-shutdown", "--wait", "--timeout", str(HALT_TIMEOUT), vm.name],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        log(f"  {vm.name}: did not shut down in {HALT_TIMEOUT}s, killing")
+        subprocess.run(["qvm-kill", vm.name], capture_output=True)
+        time.sleep(3)
+    time.sleep(2)   # small margin for storage bookkeeping
+
+
+def run_in(vm_name, command):
+    cmd = ["qvm-run", "--user", "root", "--pass-io", "--no-gui", vm_name, command]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=RUN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return 124, f"timed out after {RUN_TIMEOUT}s"
+    out = (r.stdout + r.stderr).decode("utf-8", errors="replace")
+    return r.returncode, clean(out)
+
+
+def stacks_with_lists(base, stacks):
+    """Ask the base which lists exist. The answer is only ever intersected with
+    names from the config, so the template can't make dom0 create anything that
+    isn't already there."""
+    checks = "; ".join(f"test -f {DIR}/{s['list']}.dnf && echo {s['list']}"
+                       for s in stacks)
+    _, out = run_in(base.name, checks + "; true")
+    shutdown(base)
+    found = set(out.split())
+    return [s for s in stacks if s["list"] in found]
+
+
+def prepare_template(app, base, name):
+    """Return the derived template with a fresh copy of the base's root."""
+    if name in app.domains:
+        tpl = app.domains[name]
+        if tpl.klass != "TemplateVM":
+            raise RuntimeError(f"{name} exists but is a {tpl.klass}, not a TemplateVM")
+        if not tpl.is_halted():
+            raise RuntimeError(f"{name} is running; not refreshed (will retry next rebuild)")
+        tpl.volumes["root"].revisions_to_keep = 0
+        tpl.volumes["root"].clone(base.volumes["root"])
+        log(f"  {name}: root refreshed from {base.name}")
+    else:
+        tpl = app.clone_vm(base, name)
+        tpl.label = LABEL_TEMPLATE
+        tpl.volumes["root"].revisions_to_keep = 0
+        log(f"  {name}: created as clone of {base.name}")
+    tpl.features["skip-update"] = "1"
+    return tpl
+
+
+def set_template(vm, want):
+    """Point an existing qube at 'want' if it isn't already (halted qubes only)."""
+    current = getattr(vm, "template", None)
+    if current is not None and str(current) == want:
+        return
+    if not vm.is_halted():
+        log(f"  WARN {vm.name} is running; not switched to {want} (shut it down and rerun)")
+        return
+    try:
+        vm.template = want
+    except Exception as e:
+        # e.g. a disposable template whose disposables are still running
+        log(f"  WARN {vm.name} not switched to {want}: {e} "
+            f"(shut those down, then: qvm-prefs {vm.name} template {want})")
+        return
+    log(f"  {vm.name}: template -> {want}")
+
+
+def ensure_dvm(app, s):
+    name = s["dvm"]
+    if name not in app.domains:
+        vm = app.add_new_vm("AppVM", name, LABEL_DVM, template=s["template"])
+        vm.template_for_dispvms = True
+        log(f"  {name}: created disposable template on {s['template']}")
+        return
+    vm = app.domains[name]
+    if vm.klass != "AppVM" or not vm.template_for_dispvms:
+        log(f"  WARN {name} exists but is not a disposable template; left unchanged")
+        return
+    set_template(vm, s["template"])
+
+
+def ensure_qube(app, s):
+    name = s["qube"]
+    if s["dvm"]:
+        klass, label, want = "DispVM", LABEL_NAMED_DISP, s["dvm"]
+    else:
+        klass, label, want = "AppVM", LABEL_APPVM, s["template"]
+    if name not in app.domains:
+        app.add_new_vm(klass, name, label, template=want)
+        kind = "named disposable" if klass == "DispVM" else "app qube"
+        log(f"  {name}: created {kind} on {want}")
+        return
+    vm = app.domains[name]
+    if vm.klass != klass:
+        log(f"  WARN {name} exists as {vm.klass}, config expects {klass}; left unchanged")
+        return
+    set_template(vm, want)
+
+
+def mark_built(name):
+    os.makedirs(BUILT_DIR, exist_ok=True)
+    with open(os.path.join(BUILT_DIR, name), "w", encoding="utf-8") as f:
+        f.write(time.strftime("%Y-%m-%d %H:%M") + "\n")
+
+
+def rebuild_one(app, base, s):
+    name = s["template"]
+    tpl = prepare_template(app, base, name)
+    rc, out = run_in(name, f"{APPLY} --in {name} {s['list']}")
+    for line in out.splitlines():
+        log(f"  | {line}")
+    shutdown(tpl)
+    if rc in (126, 127):
+        log(f"  {name}: FAILED: {APPLY} not found in the clone (exit {rc}); nothing "
+            f"was stripped. Re-run the installer, then: minimal-templating --only {name}")
+        return False
+    if rc != 0:
+        log(f"  {name}: apply FAILED (exit {rc}); template is half-stripped, "
+            f"fix the lists and run: minimal-templating --only {name}")
+        return False
+    for m in s["members"]:
+        if m["dvm"]:
+            ensure_dvm(app, m)
+        if m["qube"]:
+            ensure_qube(app, m)
+    mark_built(name)
+    log(f"  {name}: OK")
+    return True
+
+
+def preview(base, stacks):
+    for s in stacks:
+        log(f"preview {s['template']} (list {s['list']}):")
+        _, out = run_in(base.name, f"{APPLY} --dry-run {s['list']}")
+        for line in out.splitlines():
+            log(f"  | {line}")
+    shutdown(base)
+
+
+def status(app, base_name, stacks):
+    """Print each stack's state from dom0's view. Starts nothing."""
+    def describe(name, want_klass, want_template=None, dvm=False):
+        if not name:
+            return "-"
+        if name not in app.domains:
+            return f"{name} (missing)"
+        vm = app.domains[name]
+        if vm.klass != want_klass:
+            return f"{name} (is {vm.klass}, expected {want_klass})"
+        if dvm and not vm.template_for_dispvms:
+            return f"{name} (not a disposable template)"
+        if want_template:
+            cur = str(getattr(vm, "template", ""))
+            if cur != want_template:
+                return f"{name} (on {cur}, expected {want_template})"
+        return f"{name} ok"
+
+    base = app.domains[base_name] if base_name in app.domains else None
+    last = base.features.get("last-update", "") if base else ""
+    try:
+        with open(STAMP, encoding="utf-8") as f:
+            done = f.read().strip()
+    except FileNotFoundError:
+        done = None
+    print(f"base {base_name}: last-update {last or '?'}"
+          + ("" if last == done else "  -> rebuild pending"))
+    print()
+    for s in stacks:
+        t = s["template"]
+        try:
+            with open(os.path.join(BUILT_DIR, t), encoding="utf-8") as f:
+                built = f.read().strip()
+        except FileNotFoundError:
+            built = "never"
+        if t not in app.domains:
+            tstate = "missing"
+        elif app.domains[t].klass != "TemplateVM":
+            tstate = f"is {app.domains[t].klass}, not a TemplateVM"
+        else:
+            tstate = "ok" + ("" if app.domains[t].features.get("skip-update") else ", skip-update NOT set")
+        shared = "  (shared)" if len(s["members"]) > 1 else ""
+        print(f"[{t}]  template {tstate}, last built {built}, list {s['list']}{shared}")
+        for m in s["members"]:
+            if m["dvm"]:
+                print(f"    dvm   {describe(m['dvm'], 'AppVM', t, dvm=True)}")
+            if m["qube"]:
+                if m["dvm"]:
+                    print(f"    qube  {describe(m['qube'], 'DispVM', m['dvm'])}  (named disposable)")
+                else:
+                    print(f"    qube  {describe(m['qube'], 'AppVM', t)}  (app qube)")
+            elif m["dvm"]:
+                print("    qube  - (unnamed disposables)")
+
+
+# ----------------------------------------------------------------- switch-over
+# Prefs copied to a replacement named disposable when explicitly set on the old
+# qube (not left at their default). Label is not copied: new ones are red.
+COPY_PREFS = ("netvm", "provides_network", "autostart", "memory", "maxmem", "vcpus",
+              "kernelopts", "virt_mode", "include_in_backups", "default_dispvm",
+              "qrexec_timeout", "shutdown_timeout")
+GLOBAL_PREFS = ("default_netvm", "updatevm", "clockvm")
+
+
+def explicit(obj, prop):
+    try:
+        return not obj.property_is_default(prop)
+    except Exception:
+        return False
+
+
+def copy_settings(src, dst):
+    """Carry over what makes a sys- qube work. Returns a list of things that
+    could not be copied, for the user to set in Qube Manager."""
+    missed = []
+    for p in COPY_PREFS:
+        if explicit(src, p):
+            try:
+                setattr(dst, p, getattr(src, p))
+            except Exception as e:
+                missed.append(f"pref {p} ({e})")
+    for k in list(src.features):
+        if k.startswith("service."):
+            dst.features[k] = src.features[k]
+    try:
+        rules = src.firewall.rules
+        if rules:
+            dst.firewall.rules = rules
+    except Exception as e:
+        missed.append(f"firewall rules ({e})")
+    try:
+        for a in src.devices["pci"].get_assigned_devices():
+            dst.devices["pci"].assign(a.clone(frontend_domain=dst))
+    except Exception as e:
+        missed.append(f"PCI devices ({e})")
+    return missed
+
+
+def replace_with_named_disposable(app, s):
+    """Replace an app-qube sys- qube with a named disposable of the same name.
+    The old one is kept, shut down and not autostarting, as <name>-old. Until the
+    new one exists, everything that used the old qube points at <name>-old, so a
+    failure part-way leaves a working system."""
+    name, dvm = s["qube"], s["dvm"]
+    old = f"{name}-old"
+    if old in app.domains:
+        log(f"  {name}: SKIPPED, {old} already exists (remove or rename it first)")
+        return False
+    src = app.domains[name]
+    autostart = src.autostart        # copied from the backup below, after it is turned off there
+
+    backup = app.clone_vm(src, old)
+    backup.autostart = False
+    log(f"  {name}: backed up as {old} (autostart off)")
+
+    moved_vms = [vm for vm in app.domains
+                 if vm.name not in (name, old) and hasattr(vm, "netvm")
+                 and explicit(vm, "netvm") and str(vm.netvm) == name]
+    moved_globals = [p for p in GLOBAL_PREFS if str(getattr(app, p, "")) == name]
+    for vm in moved_vms:
+        vm.netvm = old
+    for p in moved_globals:
+        setattr(app, p, old)
+
+    del app.domains[name]
+    new = app.add_new_vm("DispVM", name, LABEL_NAMED_DISP, template=dvm)
+    missed = copy_settings(backup, new)
+    if autostart:
+        new.autostart = True
+
+    for vm in moved_vms:
+        vm.netvm = name
+    for p in moved_globals:
+        setattr(app, p, name)
+    log(f"  {name}: now a named disposable on {dvm}; re-pointed "
+        f"{len(moved_vms)} qube(s){' and ' + ', '.join(moved_globals) if moved_globals else ''}")
+    for m in missed:
+        log(f"  WARN {name}: could not copy {m}; set it in Qube Manager (see {old})")
+    return True
+
+
+def switch(app, stacks, assume_yes):
+    """Move every configured named disposable onto its stack: shut all qubes
+    down, re-point or replace, then start again what was running."""
+    todo, dvm_todo, named = [], [], []
+    for s in (m for st in stacks for m in st["members"]):
+        if not s["dvm"]:
+            continue
+        tpl = app.domains[s["template"]] if s["template"] in app.domains else None
+        dvm = app.domains[s["dvm"]] if s["dvm"] in app.domains else None
+        if tpl is None or tpl.klass != "TemplateVM" or dvm is None or not dvm.template_for_dispvms:
+            log(f"{s['qube'] or s['dvm']}: SKIPPED, {s['template']} / {s['dvm']} not built yet "
+                f"(run minimal-templating first)")
+            continue
+        # Disposable templates can only be re-pointed while none of their
+        # disposables run, which is why this happens here and not in the build.
+        if str(dvm.template) != s["template"]:
+            dvm_todo.append(s)
+        if not s["qube"]:
+            continue
+        named.append(s["qube"])
+        if s["qube"] not in app.domains:
+            todo.append((s, "create"))
+            continue
+        vm = app.domains[s["qube"]]
+        if vm.klass == "DispVM":
+            if str(vm.template) != s["dvm"]:
+                todo.append((s, "repoint"))
+        elif vm.klass == "AppVM":
+            todo.append((s, "replace"))
+        else:
+            log(f"{s['qube']}: SKIPPED, is a {vm.klass}")
+    if not todo and not dvm_todo:
+        log("switch: nothing to do, everything is on its stack")
+        return 0
+
+    print("\nSwitch-over plan:")
+    for s in dvm_todo:
+        print(f"  {s['dvm']:16} point at {s['template']} (now on {app.domains[s['dvm']].template})")
+    for s, action in todo:
+        desc = {"create": f"create named disposable on {s['dvm']}",
+                "repoint": f"point at {s['dvm']}",
+                "replace": f"replace app qube with named disposable on {s['dvm']}; "
+                           f"old one kept as {s['qube']}-old"}[action]
+        print(f"  {s['qube']:16} {desc}")
+    print("\nThis shuts down ALL running qubes first (save your work), then starts")
+    print("the ones from this plan that were running again.")
+    if not assume_yes:
+        if input("Continue? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("cancelled, nothing changed")
+            return 1
+
+    was_running = {vm.name for vm in app.domains
+                   if vm.name != "dom0" and vm.is_running()}
+    log(f"switch: shutting down all qubes ({len(was_running)} running)")
+    subprocess.run(["qvm-shutdown", "--all", "--wait", "--timeout", "300"])
+
+    failed = []
+    for s in dvm_todo:
+        try:
+            app.domains[s["dvm"]].template = s["template"]
+            log(f"  {s['dvm']}: template -> {s['template']}")
+        except Exception as e:
+            log(f"  {s['dvm']}: ERROR {e}")
+            failed.append(s["dvm"])
+    for s, action in todo:
+        try:
+            if action == "create":
+                app.add_new_vm("DispVM", s["qube"], LABEL_NAMED_DISP, template=s["dvm"])
+                log(f"  {s['qube']}: created named disposable on {s['dvm']}")
+            elif action == "repoint":
+                app.domains[s["qube"]].template = s["dvm"]
+                log(f"  {s['qube']}: template -> {s['dvm']}")
+            elif not replace_with_named_disposable(app, s):
+                failed.append(s["qube"])
+        except Exception as e:
+            log(f"  {s['qube']}: ERROR {e}")
+            failed.append(s["qube"])
+
+    for q in named:
+        start = q if q in app.domains else f"{q}-old"
+        if q in was_running and start in app.domains:
+            r = subprocess.run(["qvm-start", "--skip-if-running", start],
+                               capture_output=True, text=True)
+            log(f"  started {start}" if r.returncode == 0
+                else f"  WARN could not start {start}: {r.stderr.strip()[:200]}")
+
+    msg = "switch-over done" + (f", FAILED: {' '.join(failed)}" if failed else "")
+    log(msg)
+    notify("Switch-over completed", msg + f"\nSee {LOG}")
+    return 1 if failed else 0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--auto", action="store_true")
+    ap.add_argument("--only", action="append", default=[])
+    ap.add_argument("--preview", action="store_true")
+    ap.add_argument("--status", action="store_true")
+    ap.add_argument("--switch", action="store_true")
+    ap.add_argument("--yes", action="store_true")
+    args = ap.parse_args()
+
+    os.makedirs(STATE_DIR, exist_ok=True)
+    base_name, stacks = load_config()
+    if args.only:
+        stacks = [s for s in stacks if s["template"] in args.only]
+        if not stacks:
+            sys.exit("no matching sections for --only")
+
+    app = qubesadmin.Qubes()
+
+    if args.status:
+        status(app, base_name, stacks)
+        return 0
+
+    lockf = open(LOCK, "w")
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("minimal-templating already running", flush=True)
+        return 0
+
+    if args.switch:
+        return switch(app, stacks, args.yes)
+
+    base = app.domains[base_name]
+
+    if args.preview:
+        preview(base, stacks)
+        return 0
+
+    if not base.is_halted():
+        print(f"{base_name} is running; rebuild waits for its shutdown", flush=True)
+        return 0
+
+    last_update = base.features.get("last-update", "") or ""
+    try:
+        with open(STAMP, encoding="utf-8") as f:
+            previous = f.read().strip()
+    except FileNotFoundError:
+        previous = None
+    if args.auto and last_update == previous:
+        return 0
+
+    log(f"rebuild start: {base_name} last-update={last_update!r} previous={previous!r}")
+    ready = stacks_with_lists(base, stacks)
+    for s in stacks:
+        if s not in ready:
+            log(f"{s['template']}: skipped, no {DIR}/{s['list']}.dnf in {base_name}")
+
+    failed = []
+    for s in ready:
+        log(f"{s['template']} (list {s['list']}):")
+        try:
+            if not rebuild_one(app, base, s):
+                failed.append(s["template"])
+        except Exception as e:
+            log(f"  {s['template']}: ERROR {e}")
+            failed.append(s["template"])
+
+    # Record this base version as handled even if some failed: failures are
+    # fixed and rerun by hand, and the listener must not retry in a loop.
+    if not args.only:
+        with open(STAMP, "w", encoding="utf-8") as f:
+            f.write(last_update + "\n")
+
+    # The one notification per run.
+    ok = len(ready) - len(failed)
+    if failed:
+        log(f"rebuild finished: {ok} OK, failed: {' '.join(failed)}")
+        notify("Templating process completed",
+               f"{ok} OK, {len(failed)} FAILED: {' '.join(failed)}\n"
+               f"Don't restart their qubes until fixed. See {LOG}")
+        return 1
+    log(f"rebuild finished: {ok} templates OK")
+    notify("Templating process completed", f"{ok} templates OK")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

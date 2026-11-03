@@ -1,0 +1,41 @@
+#!/bin/bash
+# Restore saved Wi-Fi .nmconnection files into the disposable net qube.
+# Installed by sys-net-wifi/setup.sh (or the all-in-one setup) in the net
+# qube's disposable template, e.g. sys-net-dvm, as
+#   /rw/config/rc.local-early.d/wifi-persistence.rc   (executable)
+# together with the credential folder (mode 700):
+#   /usr/local/etc/nm-connections
+#
+# After joining a new network in sys-net, save its .nmconnection into the dvm
+# template from dom0 (neither qube has passwordless sudo, so do it as root via
+# qvm-run; the file is piped straight through and never shown in dom0):
+#   f='<network name>.nmconnection'
+#   qvm-run -u root --pass-io sys-net "cat '/etc/NetworkManager/system-connections/$f'" |
+#     qvm-run -u root --pass-io sys-net-dvm "umask 077; cat > '/usr/local/etc/nm-connections/$f'"
+# The net qube's name is set below (setup.sh --qube NAME sets it for you).
+
+set -euo pipefail
+shopt -s nullglob
+
+net_qube="sys-net"
+nm_config_dir="/usr/local/etc/nm-connections"
+nm_dest="/etc/NetworkManager/system-connections"
+
+files=("$nm_config_dir"/*.nmconnection)
+(( ${#files[@]} )) || exit 0
+
+# Fast path: sys-net
+if [ "$(qubesdb-read /name)" = "$net_qube" ]; then
+    install -m 600 -o root -g root -Z -t "$nm_dest" -- "${files[@]}"
+    rm -f -- "${files[@]}"
+    # Normally a no-op since local-early.d runs before NetworkManager
+    if systemctl is-active --quiet NetworkManager; then
+        nmcli connection reload || true
+    fi
+    exit 0
+fi
+
+# Safety net: strip stored credentials from any other disposable
+if [ "$(qubesdb-read /qubes-vm-persistence)" = "none" ]; then
+    rm -f -- "${files[@]}"
+fi

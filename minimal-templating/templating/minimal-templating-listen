@@ -1,0 +1,75 @@
+#!/usr/bin/python3
+# minimal-templating-listen - run minimal-templating after the base template is updated (dom0).
+#
+# Install as ~/.local/bin/minimal-templating-listen (chmod +x), started by the systemd
+# user unit minimal-templating-listen.service. Idle cost: one small Python process
+# blocked on the qubesd event socket.
+#
+# Triggers 'minimal-templating --auto' (which itself checks that the base is halted and
+# that its last-update feature changed) on:
+#   - listener start (catches updates made while it wasn't running)
+#   - the base template shutting down (the updater shuts it down when done)
+#   - the base's last-update feature being set
+
+import asyncio
+import configparser
+import os
+import sys
+
+import qubesadmin
+import qubesadmin.events
+
+REBUILD = os.path.expanduser("~/.local/bin/minimal-templating")
+CONF = os.path.expanduser("~/.config/minimal-templating/templates.conf")
+DELAY = 20      # seconds to let the updater finish writing features
+
+
+class Trigger:
+    def __init__(self):
+        self.task = None
+        self.again = False
+
+    def fire(self, why):
+        print(f"event: {why}", flush=True)
+        if self.task and not self.task.done():
+            self.again = True          # run once more after the current one
+            return
+        self.task = asyncio.get_running_loop().create_task(self._run())
+
+    async def _run(self):
+        while True:
+            self.again = False
+            await asyncio.sleep(DELAY)
+            proc = await asyncio.create_subprocess_exec(REBUILD, "--auto")
+            await proc.wait()
+            if not self.again:
+                return
+
+
+async def main():
+    cp = configparser.ConfigParser()
+    if not cp.read(CONF):
+        sys.exit(f"missing config {CONF}")
+    base = cp.get("general", "base")
+
+    trig = Trigger()
+    trig.fire("startup")
+
+    def on_event(subject, event, **kwargs):
+        if subject is not None and str(subject) == base:
+            trig.fire(f"{event} {base}")
+
+    while True:
+        try:
+            app = qubesadmin.Qubes()
+            disp = qubesadmin.events.EventsDispatcher(app)
+            disp.add_handler("domain-shutdown", on_event)
+            disp.add_handler("domain-feature-set:last-update", on_event)
+            await disp.listen_for_events()
+        except Exception as e:
+            print(f"event stream error: {e}; reconnecting in 30s", file=sys.stderr, flush=True)
+        await asyncio.sleep(30)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

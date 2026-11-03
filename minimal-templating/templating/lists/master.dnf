@@ -1,0 +1,25 @@
+# Everything added on top of fedora-44-minimal. Each derived template keeps only
+# what its own list names; everything else here is removed from it.
+
+# admin convenience (removed from every derived template that does not list it)
+xfce4-terminal
+qubes-core-agent-passwordless-root
+
+# file manager (kept where a list names it)
+Thunar
+
+# networking
+qubes-core-agent-networking
+qubes-core-agent-dom0-updates
+qubes-core-agent-network-manager
+NetworkManager-wifi
+network-manager-applet
+iwlwifi-mvm-firmware
+iwlbluetooth-firmware
+
+# notifications
+notification-daemon
+qubes-notification-agent
+
+# USB
+qubes-usb-proxy

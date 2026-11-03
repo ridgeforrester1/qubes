@@ -1,0 +1,56 @@
+#!/bin/bash
+# Set up a disposable WireGuard VPN qube at boot.
+# Installed by sys-vpn-wireguard/setup.sh (or the all-in-one setup) in the VPN
+# qube's disposable template, e.g. sys-vpn-dvm, as
+#   /rw/config/rc.local.d/vpn-autoconnect.rc   (executable)
+# together with the config folder (owned by root, mode 700):
+#   /usr/local/etc/wg-configs
+# Add WireGuard configs from dom0 (piped straight through, never shown in dom0):
+#   f='<name>.conf'
+#   qvm-run --pass-io <source qube> "cat '/home/user/path/to/$f'" |
+#     qvm-run -u root --pass-io sys-vpn-dvm "umask 077; cat > '/usr/local/etc/wg-configs/$f'"
+# or open a root terminal in the dvm template ('qvm-run -u root sys-vpn-dvm
+# xfce4-terminal') and move files there after qvm-copy.
+# File names become interface names: max 15 characters.
+# The VPN qube's name and default config are set below (setup.sh --qube NAME
+# --default NAME sets them for you).
+
+set -euo pipefail
+shopt -s nullglob
+
+vpn_qube="sys-vpn"
+wg_config_dir="/usr/local/etc/wg-configs"
+default_vpn=""   # file name without .conf, e.g. "wg-xx"; blank or invalid = random
+
+files=("$wg_config_dir"/*.conf)
+(( ${#files[@]} )) || exit 0
+
+# Fast path: sys-vpn
+if [ "$(qubesdb-read /name)" = "$vpn_qube" ]; then
+    # Delete stored keys however the script exits
+    trap 'rm -f -- "${files[@]}"' EXIT
+
+    # Import each config; skip any that fail
+    imported=()
+    for f in "${files[@]}"; do
+        name="${f##*/}"
+        nmcli connection import type wireguard file "$f" && imported+=("${name%.conf}")
+    done
+    (( ${#imported[@]} )) || exit 1
+
+    # Use default if it imported, otherwise pick one at random
+    if [[ -z "$default_vpn" || " ${imported[*]} " != *" $default_vpn "* ]]; then
+        default_vpn="${imported[RANDOM % ${#imported[@]}]}"
+    fi
+
+    for vpn in "${imported[@]}"; do
+        [ "$vpn" = "$default_vpn" ] || nmcli connection down "$vpn" || true
+    done
+
+    exit 0
+fi
+
+# Safety net: strip stored configs from any other disposable
+if [ "$(qubesdb-read /qubes-vm-persistence)" = "none" ]; then
+    rm -f -- "${files[@]}"
+fi
