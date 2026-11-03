@@ -60,7 +60,7 @@ Qubes updater ──► fedora-44-minimal (base) ──shuts down──► watch
 
 ```sh
 # in an app qube: get the repository, then in dom0:
-qvm-run --pass-io <qube> 'cat ~/minimal-templating/setup-all-in-one.sh' > ~/setup-all-in-one.sh
+qvm-run --pass-io <qube> 'cat ~/qubes/setup-all-in-one.sh' > ~/setup-all-in-one.sh
 less ~/setup-all-in-one.sh
 bash ~/setup-all-in-one.sh
 ```
