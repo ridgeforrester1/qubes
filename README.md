@@ -1,46 +1,41 @@
-# Minimal templating for Qubes OS
+# Qubes configuration scripts
 
-Build one stripped-down template per qube from a single base template, so each
-qube carries only the packages it needs, while updates are downloaded once,
-into the base. Plus three optional modules for disposable sys- qubes: Wi-Fi
-credential persistence for sys-net, WireGuard autoconnect for sys-vpn, and
-Flatpak integration for templates.
+Scripts for a leaner, mostly disposable [Qubes OS](https://www.qubes-os.org/)
+setup. The main one, **minimal templating**, builds one stripped-down template
+per qube from a single base template, so each qube carries only the packages it
+needs while updates are downloaded once, into the base. Three smaller modules
+make disposable sys- qubes practical, and each works on its own:
 
-Written for **Qubes OS 4.3** with **fedora-44-minimal** as the base. Use the
-whole thing, or any module on its own.
+1. **Minimal templating**: one minimal template per qube, rebuilt automatically after every base update.
+2. **sys-net Wi-Fi persistence**: a disposable sys-net that remembers your Wi-Fi networks.
+3. **sys-vpn WireGuard autoconnect**: a disposable sys-vpn that brings up your WireGuard VPN at boot.
+4. **Flatpak integration**: Flatpak apps in templates, updated by the Qubes updater.
+
+Written for **Qubes OS 4.3** with **fedora-44-minimal** as the base template.
 
 > These scripts run as root in dom0 and in your templates. Read them before
 > running them; that is what this repository is for. They have been used on one
 > system; treat them as a starting point, not a finished product.
 
 > **AI disclosure:** these scripts and this documentation were written with
-> substantial help from Claude, Anthropic's AI assistant, and then tested and
-> adjusted by the maintainer on their own Qubes system. That makes reviewing
-> them before use all the more important.
+> substantial help from a large language model, then tested and adjusted by the
+> maintainer on their own Qubes system. That makes reviewing them before use all
+> the more important.
 
 ## Contents
 
 | Part | Runs in | What it does |
 | --- | --- | --- |
-| [`setup-all-in-one.sh`](setup-all-in-one.sh) | dom0 | Templating plus any of the three modules, with all questions asked up front |
-| [`templating/`](templating) | dom0 + base template | The templating mechanism only |
+| [`templating/`](templating) | dom0 + base template | Minimal templating: the main part of this repository |
 | [`sys-net-wifi/`](sys-net-wifi) | net qube's disposable template | Restores saved Wi-Fi networks in a disposable sys-net at boot |
 | [`sys-vpn-wireguard/`](sys-vpn-wireguard) | VPN qube's disposable template | Imports WireGuard configs into a disposable sys-vpn at boot |
 | [`flatpak/`](flatpak) | any template | Flatpak, Flathub, automatic app updates, updates-proxy settings |
-| [`tools/build.py`](tools/build.py) | anywhere | Regenerates every `setup.sh` / installer from the plain files |
+| [`setup-all-in-one.sh`](setup-all-in-one.sh) | dom0 | Minimal templating plus any of the three modules in one run |
+| [`tools/build.py`](tools/build.py) | anywhere | Regenerates every installer from the plain source files |
 
-## How templating works
+## 1. Minimal templating
 
-```
-Qubes updater ──► fedora-44-minimal (base) ──shuts down──► watcher (dom0)
-                        │  thin clone, then dnf remove
-          ┌─────────────┼──────────────┐
-     f44-sys-net   f44-sys-vpn   other f44-* templates     base minus each qube's list
-          │             │              │
-     sys-net-dvm   sys-vpn-dvm    other *-dvm               disposable templates
-          │             │              │
-       sys-net       sys-vpn     sys-firewall, ...          named disposables
-```
+![Updates go into the base once; every qube gets a stripped copy. The Qubes updater updates fedora-44-minimal, the base; when it shuts down, the watcher in dom0 rebuilds. Each f44-* template is a thin clone of the base with its own list removed, each disposable template sits on its f44-* template, and each sys- qube is a named disposable on its disposable template.](docs/templating.svg)
 
 - **One base, updated once.** Every package you add goes into the base and is
   listed in `master.dnf`.
@@ -56,37 +51,36 @@ Qubes updater ──► fedora-44-minimal (base) ──shuts down──► watch
 - **dom0 stays in charge.** Which templates and qubes exist is decided only by
   `templates.conf` in dom0; output from templates is treated as untrusted text.
 
-## Quick start: everything
+### Install
 
 ```sh
 # in an app qube: get the repository, then in dom0:
-qvm-run --pass-io <qube> 'cat ~/qubes/setup-all-in-one.sh' > ~/setup-all-in-one.sh
-less ~/setup-all-in-one.sh
-bash ~/setup-all-in-one.sh
+qvm-run --pass-io <qube> 'cat ~/qubes/templating/install.sh' > ~/install.sh
+less ~/install.sh
+bash ~/install.sh
 ```
 
-It asks four questions first (Wi-Fi, WireGuard, Flatpak, switch-over), then
-runs to the end on its own:
+It asks one question first (whether to do the switch-over), then runs to the
+end on its own:
 
 1. Downloads `fedora-44-minimal` if missing, runs `dnf upgrade`, installs `master.dnf`.
-2. Writes the lists into the base (and runs `flatpak/setup.sh` if chosen).
+2. Writes the scripts and lists into the base.
 3. Builds every `f44-*` template and disposable template. Your qubes keep running.
-4. Installs the chosen modules in `sys-net-dvm` / `sys-vpn-dvm`.
-5. Switch-over, if chosen: **shuts down all qubes**, replaces each app-qube sys-
-   qube with a named disposable of the same name (the old one is kept as
-   `<name>-old`, with netvm, provides-network, autostart, memory, services,
-   firewall rules and PCI devices copied across), and starts them again.
-6. Enables the watcher.
+4. Switch-over, if chosen: **shuts down all qubes**, points each disposable
+   template at its `f44-*` template, and replaces each app-qube sys- qube with a
+   named disposable of the same name (the old one is kept as `<name>-old`, with
+   netvm, provides-network, autostart, memory, services, firewall rules and PCI
+   devices copied across), then starts them again.
+5. Enables the watcher.
 
 Save your work in every qube before answering yes to the switch-over. Re-running
 is safe; your `templates.conf` is never overwritten.
 
-`templating/install.sh` is the same without the three modules.
-
 ### Configuration
 
 `~/.config/minimal-templating/templates.conf` (dom0) lists the stacks to build;
-its header documents every option. The default:
+its header documents every option, including how to add a qube and how to share
+one template between identical stacks. The default:
 
 ```ini
 [general]
@@ -124,11 +118,22 @@ your own hardware's firmware (`lspci`, then `dnf search firmware`).
 The watcher only reacts to the Qubes updater changing the base. After editing the
 base by hand, run `minimal-templating` yourself.
 
-## Module: sys-net Wi-Fi persistence
+### Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| Base updated, nothing rebuilt | `systemctl --user enable --now minimal-templating-listen.service` (`preset: enabled` does not mean it is on) |
+| `apply: FAIL allowlisted packages were removed as dependents: X` | Add the package dnf removed (shown above that line) to the qube's `.dnf` |
+| A qube works on the base but not on its `f44-*` template | `minimal-templating --preview --only f44-x` shows exactly what was removed |
+| A boot script works on the base but not on `f44-*` | It uses `sudo`; the derived templates have no passwordless root. Boot scripts already run as root |
+| Templates can't download (curl error 56) | The updates-proxy policy points at a qube not running `qubes-updates-proxy`; check `grep -h UpdatesProxy /etc/qubes/policy.d/*.policy` |
+| dom0 updates fail through sys-firewall | Keep `qubes-core-agent-dom0-updates` in `sys-firewall.dnf` (in the defaults) |
+
+## 2. sys-net Wi-Fi persistence
 
 A disposable sys-net forgets every network at shutdown. This module keeps
 `.nmconnection` files in the disposable template and restores them early in
-each boot, before NetworkManager starts.
+each boot, before NetworkManager starts. It does not need minimal templating.
 
 Run as root in the **disposable template** (e.g. `sys-net-dvm`), not the disposable:
 
@@ -151,11 +156,11 @@ qvm-run -u root --pass-io sys-net "cat '/etc/NetworkManager/system-connections/$
 Only the qube named by `--qube` loads the networks; any other disposable based
 on the same template has the files deleted at boot.
 
-## Module: sys-vpn WireGuard autoconnect
+## 3. sys-vpn WireGuard autoconnect
 
 Keeps WireGuard configs in the VPN qube's disposable template; at each boot the
 disposable imports them with `nmcli`, deletes its copies, and keeps one
-connection up.
+connection up. It does not need minimal templating.
 
 ```sh
 sudo bash sys-vpn-wireguard/setup.sh [--qube sys-vpn] [--default wg-nl1]
@@ -173,7 +178,7 @@ File names become interface names, so keep them to 15 characters. `--default`
 picks the config to bring up; without it, one is chosen at random each boot.
 If you use a killswitch qube, allow each config's endpoint there.
 
-## Module: Flatpak integration
+## 4. Flatpak integration
 
 Run as root in a **template**:
 
@@ -206,6 +211,22 @@ they are stripped, so Flatpak downloads only ever happen in the base.
 Both files check `qubesdb-read /type`; if that prints nothing in your template
 (it should print `TemplateVM`), use `/qubes-vm-type` instead.
 
+## All-in-one setup
+
+[`setup-all-in-one.sh`](setup-all-in-one.sh) does minimal templating and any of
+the three modules in one run, from dom0:
+
+```sh
+qvm-run --pass-io <qube> 'cat ~/qubes/setup-all-in-one.sh' > ~/setup-all-in-one.sh
+less ~/setup-all-in-one.sh
+bash ~/setup-all-in-one.sh
+```
+
+It asks four questions first (Wi-Fi, WireGuard, Flatpak, switch-over), then does
+the templating install above, running `flatpak/setup.sh` in the base and the
+chosen module `setup.sh` scripts in `sys-net-dvm` and `sys-vpn-dvm`. It runs the
+modules' own setup scripts unchanged, so there is one code path to audit.
+
 ## Auditing
 
 The `setup.sh` scripts and the two dom0 installers are **generated**: each
@@ -216,25 +237,14 @@ the generated scripts contain exactly those:
 python3 tools/build.py --check     # exit 1 if any generated script differs from its sources
 ```
 
-CI runs the same check, plus `bash -n` on every script.
-
-## Troubleshooting
-
-| Symptom | Fix |
-| --- | --- |
-| Base updated, nothing rebuilt | `systemctl --user enable --now minimal-templating-listen.service` (`preset: enabled` does not mean it is on) |
-| `apply: FAIL allowlisted packages were removed as dependents: X` | Add the package dnf removed (shown above that line) to the qube's `.dnf` |
-| A qube works on the base but not on its `f44-*` template | `minimal-templating --preview --only f44-x` shows exactly what was removed |
-| A boot script works on the base but not on `f44-*` | It uses `sudo`; the derived templates have no passwordless root. Boot scripts already run as root |
-| Templates can't download (curl error 56) | The updates-proxy policy points at a qube not running `qubes-updates-proxy`; check `grep -h UpdatesProxy /etc/qubes/policy.d/*.policy` |
-| dom0 updates fail through sys-firewall | Keep `qubes-core-agent-dom0-updates` in `sys-firewall.dnf` (in the defaults) |
+CI runs the same check on every push and pull request, plus a syntax check of
+every script.
 
 ## Layout
 
 ```
-setup-all-in-one.sh            generated: templating + modules (dom0)
 templating/
-  install.sh                   generated: templating only (dom0)
+  install.sh                   generated: minimal templating installer (dom0)
   minimal-templating           dom0: build, status, preview, switch-over
   minimal-templating-listen    dom0: the watcher
   minimal-templating-listen.service
@@ -251,11 +261,13 @@ flatpak/
   setup.sh                     generated
   05-flatpak-update.sh
   flatpak-proxy.sh
+setup-all-in-one.sh            generated: templating + modules (dom0)
 tools/build.py                 regenerates the generated scripts
+docs/templating.svg            the diagram above
 ```
 
 ## Licence
 
-[MIT](LICENSE), © 2026 ridgeforrester1. Provided as is, with no warranty of any kind: these scripts
-change templates, qubes and dom0 settings, and you use them entirely at your
-own risk. Back up anything you care about first.
+[MIT](LICENSE), © 2026 ridgeforrester1. Provided as is, with no warranty of any
+kind: these scripts change templates, qubes and dom0 settings, and you use them
+entirely at your own risk. Back up anything you care about first.
