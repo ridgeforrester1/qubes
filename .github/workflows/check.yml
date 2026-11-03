@@ -1,0 +1,19 @@
+name: check
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generated scripts match their sources
+        run: python3 tools/build.py --check
+      - name: Shell syntax
+        run: |
+          for f in setup-all-in-one.sh templating/install.sh sys-net-wifi/setup.sh \
+                   sys-vpn-wireguard/setup.sh flatpak/setup.sh \
+                   sys-net-wifi/wifi-persistence.rc sys-vpn-wireguard/vpn-autoconnect.rc \
+                   flatpak/05-flatpak-update.sh flatpak/flatpak-proxy.sh; do
+            bash -n "$f" && echo "ok $f"
+          done
+      - name: Python syntax
+        run: python3 -m py_compile templating/minimal-templating templating/minimal-templating-listen templating/apply tools/build.py
