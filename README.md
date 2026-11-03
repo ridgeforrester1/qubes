@@ -1,6 +1,6 @@
 # Qubes configuration scripts
 
-Scripts for a leaner, mostly disposable [Qubes OS](https://www.qubes-os.org/)
+Scripts for my Qubes OS Set-up published here on the off chance they help others [Qubes OS](https://www.qubes-os.org/)
 setup. The main one, **minimal templating**, builds one stripped-down template
 per qube from a single base template, so each qube carries only the packages it
 needs while updates are downloaded once, into the base. Three smaller modules
