@@ -58,8 +58,9 @@
 #                                 named disposable:
 #                                   missing           -> create it
 #                                   named disposable  -> point it at its dvm
-#                                   app qube          -> keep it as <name>-old and
-#                                     create a named disposable in its place, copying
+#                                   app qube          -> keep it as <name>-old (or
+#                                     -old-2, ... if taken) and create a named
+#                                     disposable in its place, copying
 #                                     netvm, provides_network, autostart, memory,
 #                                     services, firewall rules and PCI devices, and
 #                                     re-pointing every qube/global setting that used it
@@ -503,16 +504,26 @@ def copy_settings(src, dst):
     return missed
 
 
+def free_old_name(app, name):
+    """<name>-old, or <name>-old-2, -old-3, ... if that is taken."""
+    old, i = f"{name}-old", 2
+    while old in app.domains:
+        old, i = f"{name}-old-{i}", i + 1
+    return old
+
+
+BACKUPS = {}   # qube -> the name its old app qube was kept under, this run
+
+
 def replace_with_named_disposable(app, s):
     """Replace an app-qube sys- qube with a named disposable of the same name.
-    The old one is kept, shut down and not autostarting, as <name>-old. Until the
-    new one exists, everything that used the old qube points at <name>-old, so a
-    failure part-way leaves a working system."""
+    The old one is kept, shut down and not autostarting, as <name>-old (or
+    -old-2, ... if that name is taken). Until the new one exists, everything that
+    used the old qube points at the backup, so a failure part-way leaves a
+    working system."""
     name, dvm = s["qube"], s["dvm"]
-    old = f"{name}-old"
-    if old in app.domains:
-        log(f"  {name}: SKIPPED, {old} already exists (remove or rename it first)")
-        return False
+    old = free_old_name(app, name)
+    BACKUPS[name] = old
     src = app.domains[name]
     autostart = src.autostart        # copied from the backup below, after it is turned off there
 
@@ -588,7 +599,7 @@ def switch(app, stacks, assume_yes):
         desc = {"create": f"create named disposable on {s['dvm']}",
                 "repoint": f"point at {s['dvm']}",
                 "replace": f"replace app qube with named disposable on {s['dvm']}; "
-                           f"old one kept as {s['qube']}-old"}[action]
+                           f"old one kept as {free_old_name(app, s['qube'])}"}[action]
         print(f"  {s['qube']:16} {desc}")
     print("\nThis shuts down ALL running qubes first (save your work), then starts")
     print("the ones from this plan that were running again.")
@@ -625,7 +636,7 @@ def switch(app, stacks, assume_yes):
             failed.append(s["qube"])
 
     for q in named:
-        start = q if q in app.domains else f"{q}-old"
+        start = q if q in app.domains else BACKUPS.get(q, f"{q}-old")
         if q in was_running and start in app.domains:
             r = subprocess.run(["qvm-start", "--skip-if-running", start],
                                capture_output=True, text=True)

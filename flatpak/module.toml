@@ -1,0 +1,15 @@
+# flatpak: what tools/build.py makes from this folder (format: tools/README.md)
+title = "Flatpak integration"
+description = "Flatpak apps in a template, updated by the Qubes updater"
+question = "Flatpak integration in the base (flatpak, Flathub, update hook, proxy)?"
+order = 30
+versions = ["setup", "dom0"]
+done = """
+Install apps system-wide in the template afterwards, e.g.:
+  sudo env http_proxy=http://127.0.0.1:8082 https_proxy=http://127.0.0.1:8082 \\
+    flatpak install --system -y flathub org.signal.Signal
+"""
+
+[target]                 # runs src/setup.sh.in in this existing qube
+qube = "@base"           # the base template (TARGET in setup-dom0.sh, base in templates.conf)
+kind = "TemplateVM"

@@ -30,8 +30,21 @@ Written for **Qubes OS 4.3** with **fedora-44-minimal** as the base template.
 | [`sys-net-wifi/`](sys-net-wifi) | net qube's disposable template | Restores saved Wi-Fi networks in a disposable sys-net at boot |
 | [`sys-vpn-wireguard/`](sys-vpn-wireguard) | VPN qube's disposable template | Imports WireGuard configs into a disposable sys-vpn at boot |
 | [`flatpak/`](flatpak) | any template | Flatpak, Flathub, automatic app updates, updates-proxy settings |
-| [`setup-all-in-one.sh`](setup-all-in-one.sh) | dom0 | Minimal templating plus any of the three modules in one run |
-| [`tools/build.py`](tools/build.py) | anywhere | Regenerates every installer from the plain source files |
+| [`setup-all-in-one.sh`](setup-all-in-one.sh) | dom0 | Minimal templating plus any of the modules in one run |
+| [`tools/`](tools) | anywhere | Builds every script from its plain source files, and tests them ([how](tools/README.md)) |
+
+Each module comes as up to three scripts, so you can pick how much to do in
+dom0:
+
+| Script | Where | For |
+| --- | --- | --- |
+| `<module>/setup.sh` | inside a qube | doing it by hand, with Qube Manager for the rest |
+| `<module>/setup-dom0.sh` | dom0 | one script that does everything; minimal templating not needed |
+| `<module>/setup-dom0-templating.sh` | dom0 | modules that make their own qubes, on a system with minimal templating |
+
+and `setup-all-in-one.sh` asks one question per module. A dom0 script that
+finds a qube already there keeps anything that may hold your data: see
+[Qubes that already exist](tools/README.md#qubes-that-already-exist).
 
 ## 1. Minimal templating
 
@@ -69,7 +82,8 @@ end on its own:
 3. Builds every `f44-*` template and disposable template. Your qubes keep running.
 4. Switch-over, if chosen: **shuts down all qubes**, points each disposable
    template at its `f44-*` template, and replaces each app-qube sys- qube with a
-   named disposable of the same name (the old one is kept as `<name>-old`, with
+   named disposable of the same name (the old one is kept as `<name>-old`, or
+   `<name>-old-2` and so on if that name is taken, with
    netvm, provides-network, autostart, memory, services, firewall rules and PCI
    devices copied across), then starts them again.
 5. Enables the watcher.
@@ -158,12 +172,17 @@ A disposable sys-net forgets every network at shutdown. This module keeps
 `.nmconnection` files in the disposable template and restores them early in
 each boot, before NetworkManager starts. It does not need minimal templating.
 
-Run as root in the **disposable template** (e.g. `sys-net-dvm`), not the disposable:
+Either from dom0 (runs it in `sys-net-dvm`; set `TARGET` at the top for
+another disposable template):
+
+```sh
+bash sys-net-wifi/setup-dom0.sh
+```
+
+or as root in the **disposable template** itself (not the disposable):
 
 ```sh
 sudo bash sys-net-wifi/setup.sh [--qube sys-net]
-# or from dom0, after copying setup.sh into the disposable template:
-qvm-run -u root -p sys-net-dvm 'bash /home/user/QubesIncoming/<qube>/setup.sh'
 ```
 
 It installs `/rw/config/rc.local-early.d/wifi-persistence.rc` and creates
@@ -186,6 +205,8 @@ disposable imports them with `nmcli`, deletes its copies, and keeps one
 connection up. It does not need minimal templating.
 
 ```sh
+bash sys-vpn-wireguard/setup-dom0.sh      # dom0: runs it in sys-vpn-dvm (TARGET at the top)
+# or as root in the disposable template itself:
 sudo bash sys-vpn-wireguard/setup.sh [--qube sys-vpn] [--default wg-nl1]
 ```
 
@@ -203,10 +224,12 @@ If you use a killswitch qube, allow each config's endpoint there.
 
 ## 4. Flatpak integration
 
-Run as root in a **template**:
+Run as root in a **template**, or from dom0 (runs it in `fedora-44-minimal`;
+set `TARGET` at the top for another template):
 
 ```sh
-sudo bash flatpak/setup.sh
+sudo bash flatpak/setup.sh       # in the template
+bash flatpak/setup-dom0.sh       # or in dom0
 ```
 
 It installs `flatpak`, adds Flathub system-wide through the updates proxy, and
@@ -237,7 +260,7 @@ Both files check `qubesdb-read /type`; if that prints nothing in your template
 ## All-in-one setup
 
 [`setup-all-in-one.sh`](setup-all-in-one.sh) does minimal templating and any of
-the three modules in one run, from dom0:
+the modules in one run, from dom0:
 
 ```sh
 qvm-run --pass-io <qube> 'cat ~/qubes/setup-all-in-one.sh' > ~/setup-all-in-one.sh
@@ -245,23 +268,28 @@ less ~/setup-all-in-one.sh
 bash ~/setup-all-in-one.sh
 ```
 
-It asks four questions first (Wi-Fi, WireGuard, Flatpak, switch-over), then does
+It asks its questions first (one per module, then the switch-over), then does
 the templating install above, running `flatpak/setup.sh` in the base and the
-chosen module `setup.sh` scripts in `sys-net-dvm` and `sys-vpn-dvm`. It runs the
+chosen module `setup.sh` scripts in `sys-net-dvm` and `sys-vpn-dvm`. A module
+that makes its own qubes is built in the same run, and its packages are added to
+`master.dnf` every time, so a re-run never drops them. On a re-run, a module
+that is already set up is offered as `[Y/n]`, so Enter keeps it. It runs the
 modules' own setup scripts unchanged, so there is one code path to audit.
 
 ## Auditing
 
-The `setup.sh` scripts and the two dom0 installers are **generated**: each
-embeds the plain files beside it verbatim. Audit the plain files, then confirm
-the generated scripts contain exactly those:
+Every script you run is **generated** by [`tools/build.py`](tools/build.py):
+it embeds each module's `src/` files, its `module.toml` settings and the shared
+dom0 helpers ([`tools/dom0-lib.sh`](tools/dom0-lib.sh)) verbatim. Audit those,
+then confirm the generated scripts contain exactly them:
 
 ```sh
 python3 tools/build.py --check     # exit 1 if any generated script differs from its sources
+bash tools/run-tests.sh            # that, syntax, and every dom0 script against mocked Qubes tools
 ```
 
-CI runs the same check on every push and pull request, plus a syntax check of
-every script.
+CI runs `tools/run-tests.sh` on every push and pull request.
+[`tools/README.md`](tools/README.md) explains the module format.
 
 ## Layout
 
@@ -275,17 +303,18 @@ templating/
   apply                        base: strips a cloned template (run by dom0)
   lists/*.dnf                  base: master.dnf and one list per qube
 sys-net-wifi/
-  setup.sh                     generated
-  wifi-persistence.rc
-sys-vpn-wireguard/
-  setup.sh                     generated
-  vpn-autoconnect.rc
-flatpak/
-  setup.sh                     generated
-  05-flatpak-update.sh
-  flatpak-proxy.sh
+  module.toml                  what the module does (its settings; format in tools/README.md)
+  src/setup.sh.in              the script that runs in the disposable template
+  src/wifi-persistence.rc      the boot hook it installs
+  setup.sh, setup-dom0.sh      generated
+sys-vpn-wireguard/             the same layout (src/vpn-autoconnect.rc)
+flatpak/                       the same layout (src/05-flatpak-update.sh, src/flatpak-proxy.sh)
 setup-all-in-one.sh            generated: templating + modules (dom0)
-tools/build.py                 regenerates the generated scripts
+tools/
+  build.py                     makes every generated script
+  dom0-lib.sh                  helpers in every dom0 script (rules for existing qubes)
+  run-tests.sh, tests/         every check; dom0's tools mocked
+  README.md                    how it fits together, module.toml format
 docs/templating.svg            the diagram above
 ```
 

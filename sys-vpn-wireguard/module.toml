@@ -1,0 +1,16 @@
+# sys-vpn-wireguard: what tools/build.py makes from this folder (format: tools/README.md)
+title = "sys-vpn WireGuard autoconnect"
+description = "a disposable sys-vpn that brings up your WireGuard VPN at boot"
+question = "WireGuard autoconnect for sys-vpn (installed in sys-vpn-dvm)?"
+order = 20
+versions = ["setup", "dom0"]
+done = """
+Add a WireGuard config from dom0 (piped through, never shown in dom0):
+  qvm-run --pass-io <source qube> 'cat ~/wg-xx.conf' |
+    qvm-run -u root --pass-io sys-vpn-dvm 'umask 077; cat > /usr/local/etc/wg-configs/wg-xx.conf'
+"""
+
+[target]                 # runs src/setup.sh.in in this existing qube
+qube = "sys-vpn-dvm"
+kind = "dvm"
+args = "--qube sys-vpn"

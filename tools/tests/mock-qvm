@@ -1,0 +1,350 @@
+#!/usr/bin/env python3
+"""Mock of the dom0 tools the generated dom0 scripts use (qvm-check, qvm-prefs, qvm-run,
+qvm-create, qvm-clone, qvm-remove, qvm-template, qvm-shutdown, qvm-firewall,
+qvm-features, qvm-appmenus, systemctl --user, sudo, and minimal-templating).
+Installed under each tool's name; behaves by argv[0].
+
+State lives in $MOCK_STATE (JSON); every call is appended to $MOCK_LOG.
+Enforces the Qubes rules the scripts rely on (classes, templates, named
+disposables only on disposable templates, a qube in use can't be removed,
+a running qube's template can't change, files pushed before they're run).
+$MOCK_RC_<qube> sets the exit code of a module's setup.sh run in that qube;
+$MOCK_MT_RC the exit code of minimal-templating. Optional, per module:
+$MOCK_ROLE_KINDS  JSON {role: kind}: the kind of qube each role must run in
+                  (TemplateVM, dvm, AppVM)
+$MOCK_ROLE_FILES  JSON {role: {path: content}}: files a role leaves behind if missing
+"""
+import configparser
+import copy
+import json
+import os
+import sys
+
+tool = os.path.basename(sys.argv[0])
+args = sys.argv[1:]
+STATE = os.environ["MOCK_STATE"]
+DEFAULTS = {"netvm": "sys-firewall", "memory": "400", "maxmem": "4000", "autostart": "False",
+            "shutdown_timeout": "60", "template_for_dispvms": "False", "label": "red"}
+
+with open(STATE) as f:
+    st = json.load(f)
+q = st["qubes"]
+
+
+def save():
+    with open(STATE, "w") as f:
+        json.dump(st, f, indent=1)
+
+
+def log(**extra):
+    with open(os.environ["MOCK_LOG"], "a") as f:
+        f.write(json.dumps({"tool": tool, "args": args, **extra}) + "\n")
+
+
+def fail(msg, code=1):
+    log(error=msg)
+    print(f"{tool}: error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def need(name):
+    if name not in q:
+        fail(f"no such domain: '{name}'", 2)
+    return q[name]
+
+
+def new_vm(klass, template=None, **prefs):
+    return {"klass": klass, "template": template, "prefs": prefs, "features": {}, "firewall": [],
+            "running": False, "files": {}, "installed": []}
+
+
+def pref(name, p):
+    v = need(name)
+    if p == "klass":
+        return v["klass"]
+    if p == "template":
+        return v.get("template") or ""
+    return v["prefs"].get(p, DEFAULTS.get(p, ""))
+
+
+def users(name):
+    return [(n, "template") for n, v in q.items() if v.get("template") == name] + \
+           [(n, "netvm") for n, v in q.items() if v["prefs"].get("netvm") == name]
+
+
+def running():
+    return sorted(n for n, v in q.items() if v["running"])
+
+
+if tool == "qvm-check":
+    names = [a for a in args if not a.startswith("-")]
+    ok = all(n in q and ("--running" not in args or q[n]["running"]) for n in names)
+    log()
+    sys.exit(0 if ok else 1)
+
+if tool == "qvm-prefs":
+    log()
+    if len(args) == 2:
+        print(pref(*args))
+    elif len(args) == 3:
+        name, p, val = args
+        vm = need(name)
+        if p == "template_for_dispvms" and vm["klass"] != "AppVM":
+            fail("only AppVMs can be disposable templates")
+        if p == "netvm" and val and val not in q:
+            fail(f"no such netvm {val}")
+        if p == "template":
+            if vm["running"]:
+                fail(f"can't change the template of running {name}")
+            t = need(val)
+            if vm["klass"] == "AppVM" and t["klass"] != "TemplateVM":
+                fail("AppVM template must be a TemplateVM")
+            vm["template"] = val
+        else:
+            vm["prefs"][p] = val
+        save()
+    else:
+        fail("usage")
+    sys.exit(0)
+
+if tool == "qvm-template":
+    log()
+    if args[:1] != ["install"]:
+        fail("only install is mocked")
+    q[args[1]] = new_vm("TemplateVM")
+    save()
+    sys.exit(0)
+
+if tool == "qvm-clone":
+    log()
+    src, dst = [a for a in args if not a.startswith("-")]
+    if dst in q:
+        fail(f"{dst} already exists")
+    s = need(src)
+    if s["running"]:
+        fail(f"{src} is running")
+    q[dst] = copy.deepcopy(s)
+    q[dst]["running"] = False
+    save()
+    sys.exit(0)
+
+if tool == "qvm-remove":
+    log()
+    if "--force" not in args and "-f" not in args:
+        fail("would ask for confirmation")
+    for n in [a for a in args if not a.startswith("-")]:
+        vm = need(n)
+        if vm["running"]:
+            fail(f"{n} is running")
+        u = users(n)
+        if u:
+            print(f"VM {n} cannot be removed. It is in use as:", file=sys.stderr)
+            for holder, prop in u:
+                print(f" - {prop} for {holder}", file=sys.stderr)
+            fail("in use")
+        del q[n]
+    save()
+    sys.exit(0)
+
+if tool == "qvm-create":
+    log()
+    opts, i, name = {}, 0, None
+    while i < len(args):
+        if args[i] in ("--class", "-C", "--template", "-t", "--label", "-l"):
+            opts[args[i].lstrip("-")[0].upper() if len(args[i]) == 2 else args[i][2:]] = args[i + 1]
+            i += 2
+        else:
+            name = args[i]
+            i += 1
+    cls, tpl = opts.get("class", "AppVM"), opts.get("template")
+    if name in q:
+        fail(f"{name} already exists")
+    if "label" not in opts:
+        fail("--label is required")
+    t = need(tpl)
+    if cls == "AppVM" and t["klass"] != "TemplateVM":
+        fail("AppVM template must be a TemplateVM")
+    if cls == "DispVM" and (t["klass"] != "AppVM" or t["prefs"].get("template_for_dispvms") != "True"):
+        fail("DispVM template must be an AppVM with template_for_dispvms=True")
+    q[name] = new_vm(cls, tpl, label=opts["label"])
+    save()
+    sys.exit(0)
+
+if tool == "qvm-run":
+    pos, i = [], 0
+    while i < len(args):
+        if args[i] in ("--user", "-u"):
+            i += 2
+            continue
+        if not args[i].startswith("-"):
+            pos.append(args[i])
+        i += 1
+    name, cmd = pos[0], pos[1]
+    vm = need(name)
+    if vm["klass"] == "DispVM" and need(vm["template"])["running"]:
+        fail(f"can't start {name} while its disposable template is running")
+    vm["running"] = True
+    if "cat > /tmp/module-setup.sh" in cmd:
+        vm["files"]["/tmp/module-setup.sh"] = sys.stdin.read()
+        save()
+        log(name=name, push=True)
+        sys.exit(0)
+    if cmd.startswith("bash /tmp/module-setup.sh"):
+        if "/tmp/module-setup.sh" not in vm["files"]:
+            fail("script was not pushed first")
+        role = cmd.split()[2:]
+        snapshot = {"policy": os.path.exists(os.environ.get("MOCK_POLICY", "/nonexistent")),
+                    "running": running(), "netvm": pref(name, "netvm")}
+        key = role[0] if role else ""
+        kinds = json.loads(os.environ.get("MOCK_ROLE_KINDS", "{}"))
+        if key in kinds:
+            k = "dvm" if vm["klass"] == "AppVM" and vm["prefs"].get("template_for_dispvms") == "True" \
+                else vm["klass"]
+            if k != kinds[key]:
+                fail(f"role {key} run in a {k}")
+        for path, content in json.loads(os.environ.get("MOCK_ROLE_FILES", "{}")).get(key, {}).items():
+            vm["files"].setdefault(path, content)
+        save()
+        log(name=name, role=role, at=snapshot)
+        rc = int(os.environ.get("MOCK_RC_" + name.replace("-", "_"), "0"))
+        print(f"[role {' '.join(role)} in {name}]")
+        sys.exit(rc)
+    if "cat > '" in cmd and ".new'" in cmd:                     # push()
+        path = cmd.split("cat > '", 1)[1].split(".new'", 1)[0]
+        vm["files"][path] = sys.stdin.read()
+        save()
+        log(name=name, wrote=path)
+        sys.exit(0)
+    if cmd.startswith("cat ") and ">" not in cmd:
+        path = cmd.split()[1]
+        save()
+        log(name=name, read=path)
+        if path not in vm["files"]:
+            print(f"cat: {path}: No such file or directory", file=sys.stderr)
+            sys.exit(1)
+        sys.stdout.write(vm["files"][path])
+        sys.exit(0)
+    if cmd.startswith("dnf -y install "):
+        vm["installed"] = sorted(set(vm.get("installed", [])) | set(cmd.split()[3:]))
+    save()
+    log(name=name, cmd=cmd)
+    sys.exit(0)
+
+if tool == "qvm-shutdown":
+    log()
+    for n in [a for a in args if not a.startswith("-")]:
+        need(n)["running"] = False
+    save()
+    sys.exit(0)
+
+if tool == "qvm-firewall":
+    log()
+    name, action, rest = args[0], args[1], args[2:]
+    vm = need(name)
+    if action == "reset":
+        vm["firewall"] = ["action=accept"]
+    elif action == "del":
+        vm["firewall"].pop(int(rest[rest.index("--rule-no") + 1]))
+    elif action == "add":
+        for r in rest:
+            k = r.split("=")[0]
+            if k not in ("action", "specialtarget", "dsthost", "proto", "dstports", "icmptype"):
+                fail(f"bad rule part {r}")
+        vm["firewall"].append(" ".join(rest))
+    elif action == "list":
+        print("NO  ACTION ...")
+        for i, r in enumerate(vm["firewall"]):
+            print(i, r)
+    save()
+    sys.exit(0)
+
+if tool == "qvm-features":
+    log()
+    need(args[0])["features"][args[1]] = args[2]
+    save()
+    sys.exit(0)
+
+if tool == "qvm-appmenus":
+    log()
+    need(args[-1])
+    sys.exit(0)
+
+if tool == "systemctl":
+    log()
+    if args[:1] != ["--user"]:
+        fail("only --user is mocked")
+    w = st.setdefault("watcher", False)
+    if args[1] in ("is-enabled", "is-active"):
+        sys.exit(0 if w else 1)
+    if args[1] == "disable":
+        st["watcher"] = False
+    elif args[1] == "enable":
+        st["watcher"] = True
+    save()
+    sys.exit(0)
+
+if tool == "sudo":
+    log()
+    if args[0] == "tee":
+        with open(args[1], "w") as f:
+            f.write(sys.stdin.read())
+    elif args[0] == "chmod":
+        os.chmod(args[2], int(args[1], 8))
+    elif args[0] == "rm" and args[1] == "-f":
+        for p in args[2:]:
+            if os.path.exists(p):
+                os.unlink(p)
+    else:
+        fail("unexpected sudo use")
+    sys.exit(0)
+
+if tool == "minimal-templating":
+    # What the real one does for --only sections (templating/minimal-templating):
+    # (re)build each template from the base, then create the dvm and qube if
+    # missing, and point existing ones of the right kind at it (halted ones only).
+    snapshot = {"running": running(), "watcher": st.get("watcher", False)}
+    log(at=snapshot)
+    if os.environ.get("MOCK_MT_RC"):
+        sys.exit(int(os.environ["MOCK_MT_RC"]))
+    if "--switch" in args:
+        st["switched"] = True
+        save()
+        sys.exit(0)
+    only = [args[i + 1] for i, a in enumerate(args) if a == "--only"]
+    cp = configparser.ConfigParser()
+    cp.read(os.path.expanduser("~/.config/minimal-templating/templates.conf"))
+    only = only or [s for s in cp.sections() if s != "general"]
+    base = cp.get("general", "base")
+    if q[base]["running"]:
+        fail("base is running")
+    st.setdefault("mt_built", [])
+    for t in only:
+        s = cp[t]
+        dvm, qube = s.get("dvm", "").strip(), s.get("qube", "").strip()
+        lst = f"/etc/minimal-templating/{qube or dvm}.dnf"
+        if lst not in q[base]["files"]:
+            print(f"{t}: no list {lst}, skipped")
+            continue
+        if t in q and q[t]["klass"] != "TemplateVM":
+            fail(f"{t} exists but is a {q[t]['klass']}")
+        if t not in q:
+            q[t] = new_vm("TemplateVM", label="black")
+        q[t]["installed"] = sorted(set(q[base].get("installed", [])))
+        q[t]["built_from_list"] = q[base]["files"][lst]
+        st["mt_built"].append(t)
+        if dvm:
+            if dvm not in q:
+                q[dvm] = new_vm("AppVM", t, label="black", template_for_dispvms="True")
+            elif q[dvm]["klass"] == "AppVM" and q[dvm]["prefs"].get("template_for_dispvms") == "True" \
+                    and not q[dvm]["running"]:
+                q[dvm]["template"] = t
+        if qube:
+            klass, on = ("DispVM", dvm) if dvm else ("AppVM", t)
+            if qube not in q:
+                q[qube] = new_vm(klass, on, label="red")
+            elif q[qube]["klass"] == klass and not q[qube]["running"]:
+                q[qube]["template"] = on
+    save()
+    sys.exit(0)
+
+fail(f"mock for {tool} not implemented")

@@ -1,0 +1,18 @@
+# sys-net-wifi: what tools/build.py makes from this folder (format: tools/README.md)
+title = "sys-net Wi-Fi persistence"
+description = "a disposable sys-net that remembers your Wi-Fi networks"
+question = "Wi-Fi login persistence for sys-net (installed in sys-net-dvm)?"
+order = 10
+versions = ["setup", "dom0"]
+done = """
+To save a network after joining it in sys-net, run in dom0 (the file is piped
+through, never shown):
+  f='<network name>.nmconnection'
+  qvm-run -u root --pass-io sys-net "cat '/etc/NetworkManager/system-connections/$f'" |
+    qvm-run -u root --pass-io sys-net-dvm "umask 077; cat > '/usr/local/etc/nm-connections/$f'"
+"""
+
+[target]                 # runs src/setup.sh.in in this existing qube
+qube = "sys-net-dvm"
+kind = "dvm"
+args = "--qube sys-net"

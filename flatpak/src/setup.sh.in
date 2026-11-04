@@ -1,0 +1,45 @@
+#!/bin/bash
+# flatpak/setup.sh - Flatpak integration for a Qubes TEMPLATE.
+@@NOTE@@#
+# Run as root in a template (e.g. fedora-44-minimal):
+#   sudo bash setup.sh
+#
+# Installs:
+#   the flatpak package (dnf) and the Flathub remote (system-wide, via the updates proxy)
+#   /etc/qubes/post-install.d/05-flatpak-update.sh   0755  upgrades Flatpak apps after
+#                                                          each dnf transaction in the template
+#   /etc/profile.d/flatpak-proxy.sh                  0644  points shells in the template at
+#                                                          the updates proxy
+# With minimal templating: also adds 'flatpak' to /etc/minimal-templating/master.dnf,
+# so derived templates keep it only where their list does.
+#
+# Install apps system-wide afterwards, e.g.:
+#   sudo env http_proxy=http://127.0.0.1:8082 https_proxy=http://127.0.0.1:8082 \
+#     flatpak install --system -y flathub org.signal.Signal
+
+set -euo pipefail
+
+case "${1:-}" in -h|--help) sed -n '2,22p' "$0" 2>/dev/null || true; exit 0 ;; esac
+[ "$(id -u)" -eq 0 ] || { echo "run as root: sudo bash setup.sh" >&2; exit 1; }
+[ "$(qubesdb-read /qubes-vm-type 2>/dev/null || true)" = TemplateVM ] || {
+    echo "run this in a template (TemplateVM), not in an app qube or disposable" >&2; exit 1; }
+
+@@EMBED@@
+install_file() {   # install_file <content> <path> <mode>
+    install -d -m 0755 "$(dirname "$2")"
+    printf '%s\n' "$1" > "$2.new"
+    chown root:root "$2.new"; chmod "$3" "$2.new"; mv -f "$2.new" "$2"
+}
+
+dnf -y install flatpak
+http_proxy=http://127.0.0.1:8082 https_proxy=http://127.0.0.1:8082 \
+    flatpak remote-add --system --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+install_file "$F_05_FLATPAK_UPDATE_SH"  /etc/qubes/post-install.d/05-flatpak-update.sh 0755
+install_file "$F_FLATPAK_PROXY_SH" /etc/profile.d/flatpak-proxy.sh 0644
+echo "installed flatpak, the Flathub remote, the update hook and the proxy file"
+
+M=/etc/minimal-templating/master.dnf
+if [ -f "$M" ] && ! grep -qx flatpak "$M"; then
+    printf '\n# Flatpak (added by flatpak/setup.sh)\nflatpak\n' >> "$M"
+    echo "added flatpak to $M (list it in each derived template's .dnf that keeps Flatpak apps)"
+fi
