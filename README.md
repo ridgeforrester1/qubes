@@ -113,7 +113,7 @@ your own hardware's firmware (`lspci`, then `dnf search firmware`).
 default 2, also used when the line is missing):
 
 - **Staggered:** only one template starts up at a time, so one boots while
-  another runs dnf. A rebuild of five templates takes roughly 40-50% less time.
+  another runs dnf. A rebuild of five templates takes about a third less time.
 - **Memory-safe:** Qubes only starts a qube if it can give it memory while every
   running qube keeps what it needs. If it can't for a second build, that build
   waits for the first to finish, and the rest continue one at a time.
