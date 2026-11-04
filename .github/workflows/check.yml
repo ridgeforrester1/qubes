@@ -4,7 +4,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Account the tests run dom0 scripts as
         run: sudo useradd -m user || true
       - name: Every check (build up to date, syntax, mocked dom0 runs, module tests)
