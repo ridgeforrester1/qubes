@@ -44,8 +44,9 @@ Written for **Qubes OS 4.3** with **fedora-44-minimal** as the base template.
   `<qube>.dnf` list does not keep removed, along with dependencies nothing else
   needs. Packages that came with the base itself are never removed.
 - **Automatic rebuilds.** A small dom0 watcher listens for the base shutting
-  down after an update and rebuilds every `f44-*` template from it. Running
-  qubes keep their version until restarted.
+  down after an update and rebuilds every `f44-*` template from it, two at a
+  time by default (see [Parallel builds](#parallel-builds)). Running qubes keep
+  their version until restarted.
 - **No traces.** After stripping, each `f44-*` template has the mechanism, the
   lists, the dnf log and its journal deleted.
 - **dom0 stays in charge.** Which templates and qubes exist is decided only by
@@ -85,6 +86,7 @@ one template between identical stacks. The default:
 ```ini
 [general]
 base = fedora-44-minimal
+parallel = 2
 
 [f44-sys-net]
 dvm = sys-net-dvm
@@ -105,11 +107,32 @@ in [`templating/lists/`](templating/lists). They include Intel Wi-Fi firmware
 (`iwlwifi-mvm-firmware`, `iwlbluetooth-firmware`) for sys-net: swap these for
 your own hardware's firmware (`lspci`, then `dnf search firmware`).
 
+### Parallel builds
+
+`parallel` in `[general]` sets how many templates build at once (1 to 4;
+default 2, also used when the line is missing):
+
+- **Staggered:** only one template starts up at a time, so one boots while
+  another runs dnf. A rebuild of five templates takes about a third less time.
+- **Memory-safe:** Qubes only starts a qube if it can give it memory while every
+  running qube keeps what it needs. If it can't for a second build, that build
+  waits for the first to finish, and the rest continue one at a time.
+- **Readable logs:** each template's lines are collected in memory while it
+  builds and written to the log as one block when it finishes; the journal
+  shows a one-line "building" note when each starts.
+- **Independent:** each template is its own clone and the base stays shut down,
+  so a failure in one build can't affect another. The summary and the single
+  notification come once every build has finished.
+
+Set `parallel = 1` to never run two building templates at once: rebuilds take
+longer, but use at most one template's worth of memory (a few hundred MB) and
+the log reads strictly in order as it happens. Above 2 gains little.
+
 ### Commands (dom0)
 
 | Command | What it does |
 | --- | --- |
-| `minimal-templating --status` | Every stack and its state; starts nothing |
+| `minimal-templating --status` | Every stack and its state, and the parallel setting; starts nothing |
 | `minimal-templating --preview [--only f44-x]` | Dry run in the base: what each list would remove |
 | `minimal-templating [--only f44-x]` | Rebuild now |
 | `minimal-templating --switch` | Move everything onto its stack (shuts down all qubes; asks first) |
