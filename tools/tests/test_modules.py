@@ -269,7 +269,7 @@ class AllInOne(Harness, unittest.TestCase):
         text = text.replace('[ "$(hostname)" = dom0 ]', "true").replace("[ -t 0 ]", "true")
         a = '''printf '%s\\n' "$F_MAIN"   > "$BIN/minimal-templating"'''
         assert a in text
-        text = text.replace(a, f'ln -sf {MOCK} "$BIN/minimal-templating"')
+        text = text.replace(a, f'ln -sf {self.mock} "$BIN/minimal-templating"')
         a = 'chmod 0755 "$BIN/minimal-templating" "$BIN/minimal-templating-listen"'
         assert a in text
         return text.replace(a, 'chmod 0755 "$BIN/minimal-templating-listen"')

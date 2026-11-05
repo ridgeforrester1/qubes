@@ -57,8 +57,13 @@ class Harness:
         os.chmod(self.t, 0o777)
         self.bindir = os.path.join(self.t, "bin")
         os.makedirs(self.bindir)
+        # a copy inside the test folder: the repository itself may be somewhere
+        # the 'user' account can't reach (as on GitHub's runners)
+        self.mock = os.path.join(self.t, "mock-qvm")
+        shutil.copy(MOCK, self.mock)
+        os.chmod(self.mock, 0o755)
         for tool in TOOLS:
-            os.symlink(MOCK, os.path.join(self.bindir, tool))
+            os.symlink(self.mock, os.path.join(self.bindir, tool))
         self.policy_dir = os.path.join(self.t, "etc/qubes/policy.d")
         os.makedirs(self.policy_dir)
         os.chmod(self.policy_dir, 0o777)
@@ -79,7 +84,7 @@ class Harness:
                 f.write(CONF)
             mtbin = os.path.join(self.t, ".local/bin")
             os.makedirs(mtbin)
-            os.symlink(MOCK, os.path.join(mtbin, "minimal-templating"))
+            os.symlink(self.mock, os.path.join(mtbin, "minimal-templating"))
             qubes["fedora-44-minimal"] = vm("TemplateVM", files={f"{D}/master.dnf": MASTER})
         qubes.update(self.initial())
         self.set_state(qubes, watcher=self.TEMPLATING)
